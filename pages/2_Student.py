@@ -1,20 +1,40 @@
 import streamlit as st
 import pandas as pd
-from backend.flowchart_pipeline import image_to_json, FlowchartGrader
+from PIL import Image
+import sys
+import os
 
 # -----------------------------------------------------------------------------
-# 1. PAGE CONFIGURATION
+# 1. IMPORTS & PATH SETUP
+# -----------------------------------------------------------------------------
+# Ensure we can find the backend folder
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+
+try:
+    # Import the NEW functional logic
+    from backend.flowchart_pipeline import (
+        generate_json_from_image, 
+        build_graph, 
+        score_node_check, 
+        score_connection_check
+    )
+except ImportError:
+    st.error("⚠️ Error: Could not import functions. Please ensure 'backend/flowchart_pipeline.py' contains the new Script A code.")
+    st.stop()
+
+# -----------------------------------------------------------------------------
+# 2. PAGE CONFIGURATION
 # -----------------------------------------------------------------------------
 st.set_page_config(page_title="Student Dashboard", page_icon="🎓", layout="wide")
 
 # -----------------------------------------------------------------------------
-# 2. SESSION STATE (Mock Identity)
+# 3. SESSION STATE (Mock Identity)
 # -----------------------------------------------------------------------------
 if 'username' not in st.session_state: st.session_state['username'] = "Alex Doe"
 if 'student_id' not in st.session_state: st.session_state['student_id'] = "ST-2024-001"
 
 # -----------------------------------------------------------------------------
-# 3. CSS STYLING (Sticky Header & Clean UI)
+# 4. CSS STYLING
 # -----------------------------------------------------------------------------
 st.markdown("""
 <style>
@@ -71,13 +91,12 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # -----------------------------------------------------------------------------
-# 4. STICKY NAVBAR
+# 5. STICKY NAVBAR
 # -----------------------------------------------------------------------------
 with st.container():
     col_head, col_log = st.columns([0.9, 0.1])
     
     with col_head:
-        # User details with tight spacing
         st.markdown(f'''
             <div style="line-height: 1.2;">
                 <div class="student-header">Hi, {st.session_state['username']} 👋</div>
@@ -86,12 +105,10 @@ with st.container():
         ''', unsafe_allow_html=True)
     
     with col_log:
-        # Align button vertically with text center
         st.markdown('<div style="margin-top: 10px;"></div>', unsafe_allow_html=True)
         if st.button("🚪 Logout", use_container_width=True):
             st.switch_page("Home.py")
 
-    # The "Line" that bridges the gap
     st.markdown("""
         <div style='height: 2px; background-color: #f0f2f6; margin-top: 1rem; width: 100%;'></div>
     """, unsafe_allow_html=True)
@@ -99,7 +116,7 @@ with st.container():
 st.markdown("<br>", unsafe_allow_html=True)
 
 # -----------------------------------------------------------------------------
-# 5. MAIN CONTENT
+# 6. MAIN CONTENT
 # -----------------------------------------------------------------------------
 
 # Check if the teacher has saved a rubric (Exam Config)
@@ -130,22 +147,53 @@ with col_left:
                     st.stop()
 
                 with st.spinner("🤖 AI is analyzing logic flow..."):
-                    # 1. Convert Student Image to JSON
-                    # (We pass the uploaded_file directly; backend uses Image.open())
-                    student_json = image_to_json(uploaded_file, "student", api_key)
-                    
-                    if student_json:
-                        # 2. Grade using the Class Logic
-                        rubric = st.session_state['rubric_data']
-                        grader = FlowchartGrader(rubric, student_json)
-                        result = grader.grade()
+                    try:
+                        # 1. LOAD IMAGE
+                        student_img = Image.open(uploaded_file)
+
+                        # 2. GENERATE STUDENT JSON (Using new backend function)
+                        student_json = generate_json_from_image(student_img, "student", api_key)
                         
-                        # 3. Store Result in Session
-                        st.session_state['exam_result'] = result
-                        st.session_state['graded'] = True
-                        st.toast("Grading Complete!", icon="🎉")
-                    else:
-                        st.error("Could not analyze image. Please try a clearer photo.")
+                        if student_json:
+                            # 3. BUILD GRAPH (Logic Extraction)
+                            node_intents, adj = build_graph(student_json["graph"])
+                            
+                            # 4. GRADING (Compare against Session State Rubric)
+                            rubric = st.session_state['rubric_data']
+                            total_score = 0
+                            breakdown = []
+
+                            # Loop through criteria defined by teacher
+                            for kp in rubric.get("key_points", []):
+                                if kp["type"] == "node_check":
+                                    score, reason = score_node_check(kp, node_intents)
+                                else:
+                                    score, reason = score_connection_check(kp, node_intents, adj)
+
+                                total_score += score
+                                breakdown.append({
+                                    "Criteria": kp["concept"], # Capitalized for table
+                                    "Status": "✅" if score > 0 else "❌",
+                                    "Marks": f"{score}/{kp['marks']}",
+                                    "Feedback": reason
+                                })
+                            
+                            # 5. COMPILE RESULT
+                            result = {
+                                "total_score": round(total_score, 2),
+                                "max_marks": rubric.get("max_marks", 0),
+                                "breakdown": breakdown
+                            }
+                            
+                            # 6. Store Result in Session
+                            st.session_state['exam_result'] = result
+                            st.session_state['graded'] = True
+                            st.toast("Grading Complete!", icon="🎉")
+                        else:
+                            st.error("Could not analyze image. The AI returned an empty response.")
+                            
+                    except Exception as e:
+                        st.error(f"An error occurred during grading: {e}")
 
 # --- RIGHT: RESULTS ---
 with col_right:
@@ -181,9 +229,12 @@ with col_right:
                     df, 
                     hide_index=True, 
                     use_container_width=True,
+                    column_order=("Status", "Criteria", "Marks", "Feedback"),
                     column_config={
                         "Status": st.column_config.TextColumn("Status", width="small"),
+                        "Criteria": st.column_config.TextColumn("Criteria", width="medium"),
                         "Marks": st.column_config.TextColumn("Marks", width="small"),
+                        "Feedback": st.column_config.TextColumn("Feedback", width="large"),
                     }
                 )
             else:

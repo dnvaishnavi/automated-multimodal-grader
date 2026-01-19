@@ -1,14 +1,28 @@
 import streamlit as st
-import tempfile
-from backend.flowchart_pipeline import image_to_json
+from PIL import Image
+import sys
+import os
 
 # -----------------------------------------------------------------------------
-# 1. PAGE CONFIGURATION
+# 1. IMPORTS & PATH SETUP
+# -----------------------------------------------------------------------------
+# Ensure we can find the backend folder
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+
+try:
+    # We import the NEW function from your existing file
+    from backend.flowchart_pipeline import generate_json_from_image
+except ImportError:
+    st.error("⚠️ Error: Could not import 'generate_json_from_image'. Please ensure you have updated 'backend/flowchart_pipeline.py' with the new code.")
+    st.stop()
+
+# -----------------------------------------------------------------------------
+# 2. PAGE CONFIGURATION
 # -----------------------------------------------------------------------------
 st.set_page_config(page_title="Teacher Dashboard", page_icon="👨‍🏫", layout="wide")
 
 # -----------------------------------------------------------------------------
-# 2. CSS STYLING (Sticky Header, Blue Buttons, Clean UI)
+# 3. CSS STYLING
 # -----------------------------------------------------------------------------
 st.markdown("""
 <style>
@@ -65,7 +79,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # -----------------------------------------------------------------------------
-# 3. STICKY NAVBAR
+# 4. STICKY NAVBAR
 # -----------------------------------------------------------------------------
 with st.container():
     col_head, col_log = st.columns([0.9, 0.1])
@@ -74,12 +88,10 @@ with st.container():
         st.markdown('<p class="dashboard-title">👨‍🏫 Teacher Dashboard</p>', unsafe_allow_html=True)
     
     with col_log:
-        # Align button vertically
         st.markdown('<div style="margin-top: 10px;"></div>', unsafe_allow_html=True)
         if st.button("🚪 Logout", use_container_width=True):
             st.switch_page("Home.py")
 
-    # The "Line" that bridges the gap
     st.markdown("""
         <div style='height: 2px; background-color: #f0f2f6; margin-top: 1rem; width: 100%;'></div>
     """, unsafe_allow_html=True)
@@ -87,7 +99,7 @@ with st.container():
 st.markdown("<br>", unsafe_allow_html=True)
 
 # -----------------------------------------------------------------------------
-# 4. EXAM CONFIGURATION
+# 5. EXAM CONFIGURATION
 # -----------------------------------------------------------------------------
 st.subheader("⚙️ Exam Configuration")
 
@@ -101,7 +113,7 @@ with st.container(border=True):
         st.number_input("Marks", value=None, placeholder="Total Marks", label_visibility="collapsed")
 
 # -----------------------------------------------------------------------------
-# 5. UPLOAD & PREVIEW AREA
+# 6. UPLOAD & PREVIEW AREA
 # -----------------------------------------------------------------------------
 st.markdown("#### 📤 Upload & Preview")
 
@@ -130,26 +142,28 @@ with col_left:
                 st.error("API Key missing in secrets.toml")
                 st.stop()
 
-            # Process Image
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmp:
-                tmp.write(model_ans.getbuffer())
-                teacher_image_path = tmp.name
-
             with st.spinner("🧠 Generating rubric from flowchart..."):
-                # Call Backend
-                rubric_data = image_to_json(
-                    image_file=teacher_image_path, # Passed as path or file object depending on backend implementation
-                    mode="teacher",
-                    api_key=api_key
-                )
+                try:
+                    # 1. Open Image directly with PIL (No temp file needed now)
+                    teacher_img = Image.open(model_ans)
+                    
+                    # 2. Call the new backend function
+                    rubric_data = generate_json_from_image(
+                        image=teacher_img, 
+                        mode="teacher", 
+                        api_key=api_key
+                    )
 
-            if rubric_data:
-                # Save to session so Student Dashboard can see it
-                st.session_state["rubric_data"] = rubric_data
-                st.session_state["exam_active"] = True
-                st.toast("Configuration Saved Successfully!", icon="✅")
-            else:
-                st.error("Failed to generate rubric. Please try a clearer image.")
+                    if rubric_data:
+                        # 3. Save to session state
+                        st.session_state["rubric_data"] = rubric_data
+                        st.session_state["exam_active"] = True
+                        st.toast("Configuration Saved Successfully!", icon="✅")
+                    else:
+                        st.error("Failed to generate rubric. The model returned no data.")
+                
+                except Exception as e:
+                    st.error(f"An error occurred: {e}")
 
 # --- RIGHT: PREVIEW ---
 with col_right:
@@ -158,6 +172,8 @@ with col_right:
             st.image(model_ans, caption="Answer Key Preview", use_container_width=True)
             if "rubric_data" in st.session_state:
                 st.success("✅ Rubric Generated & Ready")
+                with st.expander("View Generated Rubric JSON"):
+                    st.json(st.session_state["rubric_data"])
         else:
             st.markdown(
                 """
