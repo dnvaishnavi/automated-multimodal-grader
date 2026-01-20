@@ -1,187 +1,303 @@
 import streamlit as st
+import pandas as pd
+import json
+import uuid
 from PIL import Image
-import sys
-import os
 
 # -----------------------------------------------------------------------------
-# 1. IMPORTS & PATH SETUP
-# -----------------------------------------------------------------------------
-# Ensure we can find the backend folder
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-
-try:
-    # We import the NEW function from your existing file
-    from backend.flowchart_pipeline import generate_json_from_image
-except ImportError:
-    st.error("⚠️ Error: Could not import 'generate_json_from_image'. Please ensure you have updated 'backend/flowchart_pipeline.py' with the new code.")
-    st.stop()
-
-# -----------------------------------------------------------------------------
-# 2. PAGE CONFIGURATION
+# 1. PAGE CONFIGURATION & STYLING
 # -----------------------------------------------------------------------------
 st.set_page_config(page_title="Teacher Dashboard", page_icon="👨‍🏫", layout="wide")
 
-# -----------------------------------------------------------------------------
-# 3. CSS STYLING
-# -----------------------------------------------------------------------------
 st.markdown("""
 <style>
-    /* HIDE SIDEBAR & DEFAULT HEADER */
-    section[data-testid="stSidebar"] { display: none; }
-    div[data-testid="collapsedControl"] { display: none; }
-    header[data-testid="stHeader"] { display: none; }
+    /* Clean UI Overrides */
+    .block-container { padding-top: 1rem; padding-bottom: 2rem; }
     
-    /* REMOVE PADDING (Flush to top) */
-    .block-container {
-        padding-top: 0rem !important;
-        padding-bottom: 2rem !important;
+    /* Card Styling for Key Points */
+    .keypoint-card {
+        background-color: #f8f9fa;
+        border: 1px solid #e0e0e0;
+        border-radius: 8px;
+        padding: 15px;
+        margin-bottom: 10px;
+        border-left: 5px solid #007bff;
     }
-
-    /* STICKY HEADER CONTAINER */
-    div[data-testid="stVerticalBlock"] > div:first-child {
-        position: sticky;
-        top: 0;
-        z-index: 999;
-        background-color: white;
-        padding-top: 1rem;
-    }
-
-    /* HEADER TYPOGRAPHY */
-    .dashboard-title {
-        font-size: 3rem;
-        font-weight: 800;
-        color: #1E1E1E;
-        margin: 0;
-        line-height: 1;
-    }
-
-    /* BUTTON STYLES */
+    .keypoint-header { font-weight: bold; font-size: 1.05rem; color: #333; }
+    .keypoint-meta { font-size: 0.85rem; color: #666; margin-top: 5px; }
+    
+    /* Success/Action Buttons */
     div[data-testid="stButton"] > button[kind="primary"] {
-        background-color: #007bff !important;
-        border-color: #007bff !important;
-        color: white !important;
-    }
-
-    /* Small Logout Button */
-    div[data-testid="stButton"] button:not([kind="primary"]) {
-        font-size: 0.8rem;
-        padding: 0.2rem 0.6rem;
-        min-height: 0px;
-        height: auto;
-    }
-
-    /* Hide Number Input Steppers */
-    button[data-testid="stNumberInputStepDown"], 
-    button[data-testid="stNumberInputStepUp"] {
-        display: none !important;
+        background-color: #007bff;
+        border-color: #007bff;
     }
 </style>
 """, unsafe_allow_html=True)
 
 # -----------------------------------------------------------------------------
-# 4. STICKY NAVBAR
+# 2. SESSION STATE INITIALIZATION
 # -----------------------------------------------------------------------------
-with st.container():
-    col_head, col_log = st.columns([0.9, 0.1])
+if 'teacher_profile' not in st.session_state:
+    st.session_state['teacher_profile'] = {
+        "name": "Dr. Sarah Smith",
+        "subject": "Mathematics",
+        "code": "MATH-101",
+        "year": "2025"
+    }
+
+# Store all created tests here
+if 'all_tests' not in st.session_state:
+    st.session_state['all_tests'] = []
+
+# Store the current test being created/edited
+if 'current_test_builder' not in st.session_state:
+    st.session_state['current_test_builder'] = {
+        "test_id": str(uuid.uuid4())[:8],
+        "test_name": "",
+        "total_marks": 20,
+        "questions": {} # Dictionary: { "Q1": { "max_marks": 5, "key_points": [] } }
+    }
+
+# -----------------------------------------------------------------------------
+# 3. SIDEBAR: PROFILE & ACTIONS
+# -----------------------------------------------------------------------------
+with st.sidebar:
+    st.image("https://cdn-icons-png.flaticon.com/512/3135/3135715.png", width=80)
+    st.title("Teacher Profile")
     
-    with col_head:
-        st.markdown('<p class="dashboard-title">👨‍🏫 Teacher Dashboard</p>', unsafe_allow_html=True)
+    # Editable Profile
+    st.session_state['teacher_profile']['name'] = st.text_input("Name", st.session_state['teacher_profile']['name'])
+    st.session_state['teacher_profile']['subject'] = st.text_input("Subject", st.session_state['teacher_profile']['subject'])
+    st.session_state['teacher_profile']['code'] = st.text_input("Course Code", st.session_state['teacher_profile']['code'])
+    st.session_state['teacher_profile']['year'] = st.text_input("Year", st.session_state['teacher_profile']['year'])
     
-    with col_log:
-        st.markdown('<div style="margin-top: 10px;"></div>', unsafe_allow_html=True)
-        if st.button("🚪 Logout", use_container_width=True):
-            st.switch_page("Home.py")
-
-    st.markdown("""
-        <div style='height: 2px; background-color: #f0f2f6; margin-top: 1rem; width: 100%;'></div>
-    """, unsafe_allow_html=True)
-
-st.markdown("<br>", unsafe_allow_html=True)
+    st.divider()
+    if st.button("🚪 Logout", use_container_width=True):
+        st.switch_page("Home.py")
 
 # -----------------------------------------------------------------------------
-# 5. EXAM CONFIGURATION
+# 4. MAIN LAYOUT
 # -----------------------------------------------------------------------------
-st.subheader("⚙️ Exam Configuration")
+st.title("👨‍🏫 Teacher Dashboard")
+st.caption(f"Manage Assessments for **{st.session_state['teacher_profile']['subject']} ({st.session_state['teacher_profile']['code']})**")
 
-with st.container(border=True):
-    c1, c2, c3 = st.columns(3)
-    with c1:
-        st.selectbox("Subject", ["Computer Science", "Mathematics", "Physics"], label_visibility="collapsed")
-    with c2:
-        st.text_input("Exam Code", placeholder="Exam Code (e.g. CS-101)", label_visibility="collapsed")
-    with c3:
-        st.number_input("Marks", value=None, placeholder="Total Marks", label_visibility="collapsed")
+tab_create, tab_manage = st.tabs(["➕ Create Assessment", "📂 Manage Assessments"])
 
-# -----------------------------------------------------------------------------
-# 6. UPLOAD & PREVIEW AREA
-# -----------------------------------------------------------------------------
-st.markdown("#### 📤 Upload & Preview")
+# =============================================================================
+# TAB 1: CREATE TEST & RUBRIC BUILDER
+# =============================================================================
+with tab_create:
+    col1, col2 = st.columns([1, 2])
+    
+    with col1:
+        st.subheader("1. Test Details")
+        with st.container(border=True):
+            t_name = st.text_input("Test Name", placeholder="e.g. Calculus Mid-Term", key="t_name_in")
+            t_marks = st.number_input("Total Marks", min_value=1, value=20, key="t_marks_in")
+            
+            # Update State
+            st.session_state['current_test_builder']['test_name'] = t_name
+            st.session_state['current_test_builder']['total_marks'] = t_marks
 
-col_left, col_right = st.columns([1, 1], gap="medium")
+        st.subheader("2. Select Question")
+        with st.container(border=True):
+            # Dynamic Question Selector
+            q_num = st.number_input("How many questions?", min_value=1, max_value=20, value=1)
+            current_q_id = st.selectbox("Editing Question:", [f"Q{i}" for i in range(1, q_num + 1)])
+            
+            # Initialize this question in state if not exists
+            if current_q_id not in st.session_state['current_test_builder']['questions']:
+                st.session_state['current_test_builder']['questions'][current_q_id] = {
+                    "question_id": current_q_id,
+                    "max_marks": 5,
+                    "key_points": []
+                }
+            
+            # Set Marks for this specific question
+            q_marks = st.number_input(f"Marks for {current_q_id}", min_value=1, 
+                                      value=st.session_state['current_test_builder']['questions'][current_q_id]["max_marks"])
+            st.session_state['current_test_builder']['questions'][current_q_id]["max_marks"] = q_marks
 
-# --- LEFT: UPLOADS ---
-with col_left:
-    st.caption("1. Upload Question Paper")
-    st.file_uploader("QP", type=['pdf', 'jpg'], label_visibility="collapsed")
+    # --- RUBRIC BUILDER (The Core Logic) ---
+    with col2:
+        st.subheader(f"3. Rubric for {current_q_id}")
+        st.info("Define the key evaluation criteria for this question.")
+        
+        # Access current question data
+        curr_q_data = st.session_state['current_test_builder']['questions'][current_q_id]
+        
+        # --- FORM TO ADD NEW KEY POINT ---
+        # --- ADD NEW KEY POINT (Dynamic UI - No Form used to allow immediate updates) ---
+        with st.expander("➕ Add New Key Point", expanded=True):
+            # 1. Concept & Marks
+            c_a, c_b = st.columns([2, 1])
+            with c_a:
+                kp_concept = st.text_input("Concept / Description", placeholder="e.g. Power rule logic", key=f"con_{current_q_id}")
+            with c_b:
+                kp_marks = st.number_input("Marks", min_value=0.5, step=0.5, value=1.0, key=f"mk_{current_q_id}")
 
-    st.caption("2. Upload Correct Flowchart (Answer Key)")
-    model_ans = st.file_uploader("Key", type=['png', 'jpg'], label_visibility="collapsed")
-
-    st.caption("3. Rubric Notes (Optional)")
-    st.text_area("Rubric", placeholder="- Start Node (1 mark)...", height=80, label_visibility="collapsed")
-
-    st.markdown("<br>", unsafe_allow_html=True)
-
-    # --- SAVE ACTION ---
-    if st.button("💾 Save Configuration", type="primary", use_container_width=True):
-        if not model_ans:
-            st.toast("Please upload an Answer Key first.", icon="⚠️")
-        else:
-            api_key = st.secrets.get("GEMINI_API_KEY")
-            if not api_key:
-                st.error("API Key missing in secrets.toml")
-                st.stop()
-
-            with st.spinner("🧠 Generating rubric from flowchart..."):
-                try:
-                    # 1. Open Image directly with PIL (No temp file needed now)
-                    teacher_img = Image.open(model_ans)
-                    
-                    # 2. Call the new backend function
-                    rubric_data = generate_json_from_image(
-                        image=teacher_img, 
-                        mode="teacher", 
-                        api_key=api_key
-                    )
-
-                    if rubric_data:
-                        # 3. Save to session state
-                        st.session_state["rubric_data"] = rubric_data
-                        st.session_state["exam_active"] = True
-                        st.toast("Configuration Saved Successfully!", icon="✅")
-                    else:
-                        st.error("Failed to generate rubric. The model returned no data.")
-                
-                except Exception as e:
-                    st.error(f"An error occurred: {e}")
-
-# --- RIGHT: PREVIEW ---
-with col_right:
-    with st.container(border=True):
-        if model_ans:
-            st.image(model_ans, caption="Answer Key Preview", use_container_width=True)
-            if "rubric_data" in st.session_state:
-                st.success("✅ Rubric Generated & Ready")
-                with st.expander("View Generated Rubric JSON"):
-                    st.json(st.session_state["rubric_data"])
-        else:
-            st.markdown(
-                """
-                <div style='display: flex; flex-direction: column; align-items: center; 
-                            justify-content: center; height: 300px; color: #aaa;'>
-                    <div style="font-size: 3rem;">🖼️</div>
-                    <p style="margin-top: 10px;">Answer Key Preview</p>
-                </div>
-                """, 
-                unsafe_allow_html=True
+            # 2. Modality Selection (Changing this now triggers an immediate UI update)
+            kp_type = st.selectbox(
+                "Expected Response Type", 
+                ["Text / Theory", "Equation / Math", "Flowchart / Diagram", "Final Answer"],
+                key=f"type_{current_q_id}"
             )
+            
+            # 3. Dynamic Fields based on Selection
+            evidence_phrases = ""
+            expected_eq = ""
+            expected_final = ""
+            uploaded_flowchart = None
+
+            if kp_type == "Text / Theory":
+                evidence_phrases = st.text_area(
+                    "Evidence Phrases (comma separated)", 
+                    placeholder="e.g. integration by parts, substitution method",
+                    key=f"evi_{current_q_id}"
+                )
+                st.caption("The AI looks for these keywords or semantic equivalents.")
+                
+            elif kp_type == "Equation / Math":
+                expected_eq = st.text_input(
+                    "Expected Equation", 
+                    placeholder="e.g. ∫ 2x dx = x^2 + C",
+                    key=f"eqn_{current_q_id}"
+                )
+                st.caption("Supports LaTeX format.")
+
+            elif kp_type == "Final Answer":
+                expected_final = st.text_input(
+                    "Expected Final Value", 
+                    placeholder="e.g. x^2 + C or 42",
+                    key=f"fin_{current_q_id}"
+                )
+            
+            elif kp_type == "Flowchart / Diagram":
+                st.info("ℹ️ Upload the **Answer Key** image/PDF for the flowchart logic.")
+                uploaded_flowchart = st.file_uploader(
+                    "Upload Solution Diagram", 
+                    type=['png', 'jpg', 'jpeg', 'pdf'], 
+                    key=f"file_{current_q_id}"
+                )
+
+            # 4. Add Button (Standard button triggers action immediately)
+            if st.button("Add Key Point", type="primary", key=f"btn_{current_q_id}"):
+                if not kp_concept:
+                    st.error("Concept is required.")
+                else:
+                    # Construct Key Point Object
+                    new_kp = {
+                        "id": f"k{len(curr_q_data['key_points']) + 1}",
+                        "concept": kp_concept,
+                        "marks": kp_marks,
+                        "acceptable_modalities": []
+                    }
+
+                    # Map UI Type to Backend Modality
+                    if kp_type == "Text / Theory":
+                        new_kp["acceptable_modalities"] = ["text"]
+                        new_kp["evidence_phrases"] = [p.strip() for p in evidence_phrases.split(",") if p.strip()]
+                    elif kp_type == "Equation / Math":
+                        new_kp["acceptable_modalities"] = ["equation"]
+                        new_kp["expected_equation"] = expected_eq
+                    elif kp_type == "Final Answer":
+                        new_kp["acceptable_modalities"] = ["final_answer", "equation"]
+                        new_kp["expected_final_answer"] = expected_final
+                    elif kp_type == "Flowchart / Diagram":
+                        if not uploaded_flowchart:
+                            st.error("Please upload the flowchart image/PDF.")
+                            st.stop()
+                        
+                        new_kp["acceptable_modalities"] = ["flowchart"]
+                        new_kp["type"] = "flowchart_analysis"
+                        new_kp["image_uploaded"] = True
+                        new_kp["filename"] = uploaded_flowchart.name
+                        # NOTE: In production, save 'uploaded_flowchart' to a 'temp/' folder here
+
+                    curr_q_data['key_points'].append(new_kp)
+                    st.success("Key Point Added Successfully!")
+                    st.rerun()
+
+        # --- DISPLAY ADDED KEY POINTS ---
+        st.markdown("#### Defined Criteria")
+        
+        if not curr_q_data['key_points']:
+            st.caption("No key points added yet.")
+        else:
+            total_kp_score = 0
+            for idx, kp in enumerate(curr_q_data['key_points']):
+                total_kp_score += kp['marks']
+                
+                # Card Layout for existing points
+                with st.container():
+                    col_info, col_del = st.columns([0.9, 0.1])
+                    with col_info:
+                        st.markdown(f"""
+                        <div class="keypoint-card">
+                            <div class="keypoint-header">{kp['id']}: {kp['concept']} ({kp['marks']} marks)</div>
+                            <div class="keypoint-meta">Type: {kp['acceptable_modalities']}</div>
+                            {f'<div class="keypoint-meta">Expected: {kp.get("expected_equation") or kp.get("expected_final_answer") or kp.get("evidence_phrases")}</div>' if "flowchart" not in kp['acceptable_modalities'] else '<div class="keypoint-meta">📷 Image Reference</div>'}
+                        </div>
+                        """, unsafe_allow_html=True)
+                    
+                    with col_del:
+                        if st.button("🗑️", key=f"del_{current_q_id}_{idx}"):
+                            curr_q_data['key_points'].pop(idx)
+                            st.rerun()
+            
+            # Marks Validation
+            if total_kp_score != curr_q_data['max_marks']:
+                st.warning(f"⚠️ Marks Mismatch: Key points total **{total_kp_score}**, but Question Marks set to **{curr_q_data['max_marks']}**.")
+            else:
+                st.success(f"✅ Marks Matched: {total_kp_score}/{curr_q_data['max_marks']}")
+
+    # --- SAVE TEST BUTTON ---
+    st.divider()
+    if st.button("💾 Save & Publish Test", type="primary", use_container_width=True):
+        if not st.session_state['current_test_builder']['test_name']:
+            st.error("Please enter a Test Name.")
+        else:
+            # Convert Dictionary to List structure for Final JSON
+            final_questions_list = []
+            for qid, qdata in st.session_state['current_test_builder']['questions'].items():
+                final_questions_list.append(qdata)
+            
+            final_test_object = {
+                "test_id": st.session_state['current_test_builder']['test_id'],
+                "test_name": st.session_state['current_test_builder']['test_name'],
+                "subject": st.session_state['teacher_profile']['subject'],
+                "total_marks": st.session_state['current_test_builder']['total_marks'],
+                "rubric": final_questions_list # This is the array of question objects (rubric7 format)
+            }
+            
+            st.session_state['all_tests'].append(final_test_object)
+            st.success("Test Saved Successfully!")
+            st.json(final_test_object) # Show the JSON payload
+
+# =============================================================================
+# TAB 2: MANAGE ASSESSMENTS
+# =============================================================================
+with tab_manage:
+    st.subheader("📂 Existing Assessments")
+    
+    if not st.session_state['all_tests']:
+        st.info("No tests created yet.")
+    else:
+        # Create a dataframe for cleaner view
+        df_tests = pd.DataFrame(st.session_state['all_tests'])
+        
+        for index, test in enumerate(st.session_state['all_tests']):
+            with st.container(border=True):
+                c1, c2, c3, c4 = st.columns([3, 1, 1, 1])
+                with c1:
+                    st.markdown(f"### {test['test_name']}")
+                    st.caption(f"ID: {test['test_id']} | Questions: {len(test['rubric'])}")
+                with c2:
+                    st.markdown(f"**Marks:** {test['total_marks']}")
+                with c3:
+                    if st.button("View JSON", key=f"view_{index}"):
+                        st.json(test['rubric'])
+                with c4:
+                    if st.button("🗑️ Delete", key=f"del_test_{index}"):
+                        st.session_state['all_tests'].pop(index)
+                        st.rerun()
