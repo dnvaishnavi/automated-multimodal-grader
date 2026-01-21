@@ -2,3 +2,12 @@ streamlit
 google-genai
 pillow
 pandas
+sympy 
+numpy 
+nltk 
+sentence-transformers 
+latex2sympy2 
+pint 
+chempy
+openai
+pymupdf 

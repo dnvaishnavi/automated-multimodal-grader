@@ -41,24 +41,70 @@ Schema:
 }
 """
 
+# TEACHER_PROMPT = """
+# Analyze this correct flowchart carefully.
+
+# If some text is unclear, make your best reasonable guess.
+# DO NOT return an empty response.
+
+# Return ONLY a RAW JSON object (no markdown).
+
+# Schema:
+# {
+#   "question_id": "Q7",
+#   "max_marks": 5,
+#   "key_points": [
+#     {
+#       "id": "k1",
+#       "concept": "Start Node",
+#       "type": "node_check",
+#       "expected_text": "Start",
+#       "marks": 1
+#     }
+#   ]
+# }
+# """
 TEACHER_PROMPT = """
-Analyze this correct flowchart carefully.
+Analyze this image carefully. It is a "Teacher's Solution" or "Answer Key" (Flowchart or Diagram).
+Your task is to extract a **Grading Rubric (Checklist)** that can be used to grade student submissions.
 
-If some text is unclear, make your best reasonable guess.
-DO NOT return an empty response.
+**Instructions:**
+1.  **Detect Domain:** Determine if this is a **Computer Science (Logic)** flowchart (Start -> Input -> Logic -> End) or a **General Process/Scientific** diagram (Step A -> Step B -> Step C).
+2.  **Extract Key Points:** Break down the diagram into verifiable steps.
+    * **Nodes (Steps):** Create a rule for every critical step (box/oval/diamond).
+    * **Connections (Flow):** Create a rule for every critical logic link (arrow).
+3.  **Flexible Matching:**
+    * For CS logic, use exact keywords (Start, Print, Input).
+    * For General diagrams, extract the *core concept phrases* (e.g., "Micelles form", "Photosynthesis").
+4.  **Marks:** Assign a default of **1 mark** for each key point found.
 
-Return ONLY a RAW JSON object (no markdown).
+**Return ONLY a RAW JSON object (no markdown).**
 
-Schema:
+**Schema:**
 {
-  "question_id": "Q7",
-  "max_marks": 5,
+  "question_id": "Q_AUTO",
+  "max_marks": 5, 
   "key_points": [
     {
       "id": "k1",
-      "concept": "Start Node",
+      "concept": "Initial Step / Start Node",
       "type": "node_check",
       "expected_text": "Start",
+      "marks": 1
+    },
+    {
+      "id": "k2",
+      "concept": "Input Step / Action",
+      "type": "node_check",
+      "expected_text": "Input N",
+      "marks": 1
+    },
+    {
+      "id": "k3",
+      "concept": "Logical Link / Process Flow",
+      "type": "connection_check",
+      "from_text": "Input N",
+      "to_text": "Is N > 0?",
       "marks": 1
     }
   ]
@@ -235,3 +281,16 @@ def evaluate_submission(student_img, rubric_img, api_key):
         "debug_student_json": student_json,
         "debug_rubric_json": rubric_json
     }
+# ==========================================================
+# EXPORTED FUNCTIONS FOR DASHBOARD & GRADER
+# ==========================================================
+
+def extract_teacher_graph(image_file, api_key):
+    """
+    Called by Teacher Dashboard to convert uploaded answer key image 
+    into a structured JSON graph.
+    """
+    # Convert Streamlit UploadedFile to PIL Image
+    img = Image.open(image_file)
+    return generate_json_from_image(img, "teacher", api_key)
+
