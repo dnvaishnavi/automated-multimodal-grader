@@ -1,255 +1,361 @@
 import streamlit as st
-import pandas as pd
 from PIL import Image
-import sys
-import os
+import io
+import fitz  # PyMuPDF
+import base64
+import re
+import json,pandas as pd
 
-# -----------------------------------------------------------------------------
-# 1. IMPORTS & PATH SETUP
-# -----------------------------------------------------------------------------
-# Ensure we can find the backend folder
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-
+from openai import OpenAI
+# IMPORT THE DATABASE HANDLER
 try:
-    # Import the NEW functional logic
-    from backend.flowchart_pipeline import (
-        generate_json_from_image, 
-        build_graph, 
-        score_node_check, 
-        score_connection_check
-    )
+    from backend.db_handler import submit_student_answers
 except ImportError:
-    st.error("⚠️ Error: Could not import functions. Please ensure 'backend/flowchart_pipeline.py' contains the new Script A code.")
+    st.error("⚠️ Error: Could not import 'backend/db_handler.py'. Make sure the file exists.")
     st.stop()
+# -----------------------------------------------------------------------------
+# 1. BACKEND LOGIC (From your notebook)
+# -----------------------------------------------------------------------------
+
+def get_openai_client():
+    api_key = st.secrets.get("OPENROUTER_API_KEY")
+    if not api_key:
+        st.error("⚠️ OpenRouter API Key missing in secrets.toml")
+        st.stop()
+    
+    return OpenAI(
+        base_url="https://openrouter.ai/api/v1",
+        api_key=api_key,
+    )
+
+def pdf_to_images(pdf_file, dpi=200):
+    """Converts uploaded PDF file (bytes) to PIL Images."""
+    doc = fitz.open(stream=pdf_file.read(), filetype="pdf")
+    images = []
+    for page in doc:
+        pix = page.get_pixmap(dpi=dpi)
+        img = Image.open(io.BytesIO(pix.tobytes("png")))
+        images.append(img)
+    return images
+
+def image_to_base64(image: Image.Image):
+    """Converts PIL Image to Base64 string."""
+    buffer = io.BytesIO()
+    image.save(buffer, format="PNG")
+    return base64.b64encode(buffer.getvalue()).decode("utf-8")
+
+def clean_json_text(text):
+    """Cleans Markdown code blocks from LLM response."""
+    text = re.sub(r"```json\s*", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"```", "", text)
+    return text.strip()
+
+def extract_answer_obj_from_image(image: Image.Image, question_id: str):
+    """Sends image to LLM to extract student answer as JSON."""
+    client = get_openai_client()
+    img_base64 = image_to_base64(image)
+
+    prompt = f"""
+    You are an academic answer extractor.
+    The image contains a QUESTION and its ANSWER.
+
+    TASK:
+    1. Extract ONLY the student's answer for Question ID: {question_id}.
+    2. Separate content into:
+       "text": ["List all and any sentences or text explanations written by the student.",
+            "Split distinct points into separate strings."],
+       "equations": [" - Write ALL chemical formulas and equations in STANDARD ASCII TEXT.
+        - DO NOT use Unicode subscripts or superscripts.
+        - Convert subscripts explicitly to numbers.
+
+      Examples:
+        H₂SO₄ → H2SO4
+        CH₃COOH → CH3COOH
+        C₂H₅OH → C2H5OH
+        H₂O → H2O
+      Use standard text representation (e.g., 'x^2 + 2x = 5', 'H2 + O2 -> H2O').
+      - Use '->' for reactions (do NOT use →).
+      - If a catalyst is written above the arrow, format as:
+          Reactants -(<catalyst that is written above arrow in equation>)-> Products
+      - Write ions as:
+          Fe3+, Fe2+, e-, Fe3e+
+      - Preserve equation structure, but normalize symbols.
+
+      If the student writes unclear chemistry, make the closest reasonable interpretation."],
+       "flowcharts/graph": [" Analyze the flowchart carefully.
+          If some text is unclear, make your best reasonable guess. " return in format:
+            {{
+                "nodes": [{{"id": "n1", "text": "Start", "shape": "oval/rect/diamond"}}],
+                "edges": [{{"source": "n1", "target": "n2", "label": "Yes/No"}}]
+            }}
+       ],
+       "final_answer": "Extract final result (e.g., 'x=5'). Return null if not found."
+
+    3. Do NOT hallucinate. If section is empty, return empty list [].
+    4. OUTPUT STRICT JSON ONLY.
+
+    {{
+      "question_id": "{question_id}",
+      "text": [],
+      "equations": [],
+      "flowcharts": [],
+      "final_answer": null
+    }}
+    """
+
+    try:
+        response = client.chat.completions.create(
+            model="qwen/qwen-2.5-vl-7b-instruct:free",
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": prompt},
+                        {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{img_base64}"}}
+                    ]
+                }
+            ],
+            temperature=0
+        )
+        raw_text = response.choices[0].message.content
+        cleaned = clean_json_text(raw_text)
+        return json.loads(cleaned)
+    except Exception as e:
+        return {"error": str(e), "question_id": question_id}
 
 # -----------------------------------------------------------------------------
-# 2. PAGE CONFIGURATION
+# 2. PAGE CONFIGURATION & STYLING
 # -----------------------------------------------------------------------------
 st.set_page_config(page_title="Student Dashboard", page_icon="🎓", layout="wide")
 
-# -----------------------------------------------------------------------------
-# 3. SESSION STATE (Mock Identity)
-# -----------------------------------------------------------------------------
-if 'username' not in st.session_state: st.session_state['username'] = "Alex Doe"
-if 'student_id' not in st.session_state: st.session_state['student_id'] = "ST-2024-001"
-
-# -----------------------------------------------------------------------------
-# 4. CSS STYLING
-# -----------------------------------------------------------------------------
 st.markdown("""
 <style>
-    /* HIDE SIDEBAR & DEFAULT HEADER */
-    section[data-testid="stSidebar"] { display: none; }
-    div[data-testid="collapsedControl"] { display: none; }
-    header[data-testid="stHeader"] { display: none; }
-    
-    /* REMOVE PADDING (Flush to top) */
-    .block-container {
-        padding-top: 0rem !important;
-        padding-bottom: 2rem !important;
-    }
-
-    /* STICKY HEADER CONTAINER */
-    div[data-testid="stVerticalBlock"] > div:first-child {
-        position: sticky;
-        top: 0;
-        z-index: 999;
-        background-color: white;
-        padding-top: 1rem;
-    }
-
-    /* HEADER TYPOGRAPHY */
-    .student-header {
-        font-size: 2.5rem;
-        font-weight: 800;
-        color: #1E1E1E;
-        margin: 0;
-        line-height: 1;
-    }
-    .student-id {
-        font-size: 0.9rem;
-        color: #666;
-        font-weight: 500;
-        margin-top: 5px;
-    }
-
-    /* BUTTON STYLES */
-    div[data-testid="stButton"] > button[kind="primary"] {
-        background-color: #007bff !important;
-        border-color: #007bff !important;
-        color: white !important;
-    }
-    
-    /* Small Logout Button */
-    div[data-testid="stButton"] button:not([kind="primary"]) {
-        font-size: 0.8rem;
-        padding: 0.2rem 0.6rem;
-        min-height: 0px;
-        height: auto;
-    }
+    .student-header { font-size: 2.2rem; font-weight: 800; color: #333; margin-bottom: 0px; }
+    .sub-header { font-size: 1rem; color: #666; margin-bottom: 20px; }
+    .stButton>button { width: 100%; border-radius: 5px; height: 3rem; }
+    .success-box { padding: 15px; background-color: #d4edda; color: #155724; border-radius: 5px; margin-bottom: 10px; }
+    .json-box { background-color: #f8f9fa; border: 1px solid #ddd; padding: 10px; border-radius: 5px; font-family: monospace; font-size: 0.85rem; }
 </style>
 """, unsafe_allow_html=True)
 
 # -----------------------------------------------------------------------------
-# 5. STICKY NAVBAR
+# 3. SIDEBAR & SESSION
 # -----------------------------------------------------------------------------
-with st.container():
-    col_head, col_log = st.columns([0.9, 0.1])
-    
-    with col_head:
-        st.markdown(f'''
-            <div style="line-height: 1.2;">
-                <div class="student-header">Hi, {st.session_state['username']} 👋</div>
-                <div class="student-id">ID: {st.session_state['student_id']}</div>
-            </div>
-        ''', unsafe_allow_html=True)
-    
-    with col_log:
-        st.markdown('<div style="margin-top: 10px;"></div>', unsafe_allow_html=True)
-        if st.button("🚪 Logout", use_container_width=True):
-            st.switch_page("Home.py")
+if 'student_name' not in st.session_state: st.session_state['student_name'] = "Alex Doe"
+if 'student_id' not in st.session_state: st.session_state['student_id'] = "ST-2025-001"
+if 'extracted_data' not in st.session_state: st.session_state['extracted_data'] = []
 
-    st.markdown("""
-        <div style='height: 2px; background-color: #f0f2f6; margin-top: 1rem; width: 100%;'></div>
-    """, unsafe_allow_html=True)
-
-st.markdown("<br>", unsafe_allow_html=True)
+with st.sidebar:
+    st.image("https://cdn-icons-png.flaticon.com/512/3135/3135810.png", width=80)
+    st.title(f"Hi, {st.session_state['student_name']}")
+    st.write(f"**ID:** {st.session_state['student_id']}")
+    st.divider()
+    if st.button("🚪 Logout"):
+        st.switch_page("Home.py")
 
 # -----------------------------------------------------------------------------
-# 6. MAIN CONTENT
+# 4. MAIN CONTENT
 # -----------------------------------------------------------------------------
+st.markdown('<p class="student-header">📤 Submit Assignment</p>', unsafe_allow_html=True)
+st.markdown('<p class="sub-header">Upload your handwritten answer script (PDF or Images) for AI analysis.</p>', unsafe_allow_html=True)
 
-# Check if the teacher has saved a rubric (Exam Config)
-if 'rubric_data' not in st.session_state or not st.session_state['rubric_data']:
-    st.warning("⚠️ No active exam found. Please wait for the teacher to configure the exam.")
-    st.stop()
+col1, col2 = st.columns([1, 1], gap="large")
 
-col_left, col_right = st.columns([1, 1], gap="large")
-
-# --- LEFT: SUBMISSION ---
-with col_left:
-    st.subheader("📤 Submit Assignment")
-    
+# --- LEFT COLUMN: UPLOAD ---
+with col1:
     with st.container(border=True):
-        uploaded_file = st.file_uploader("Upload Flowchart", type=['png', 'jpg', 'jpeg'], label_visibility="collapsed")
+        st.subheader("1. Upload File")
+        uploaded_file = st.file_uploader("Choose a file", type=['pdf', 'png', 'jpg', 'jpeg'])
         
+        # Helper: If image, ask for Question ID (Since images don't have page numbers)
+        q_id_input = "Q1"
+        if uploaded_file and uploaded_file.type != "application/pdf":
+            q_id_input = st.text_input("Which Question is this?", value="Q1", help="e.g. Q1, Q2, Q3")
+
         if uploaded_file:
-            st.image(uploaded_file, caption="Preview", use_container_width=True)
-            st.markdown("<br>", unsafe_allow_html=True)
-            
-            # This triggers the grading pipeline
-            if st.button("✨ Grade My Submission", type="primary", use_container_width=True):
+            if st.button("🚀 Process & Extract Answers", type="primary"):
+                st.session_state['extracted_data'] = [] # Clear previous
                 
-                # Check for API Key
-                api_key = st.secrets.get("GEMINI_API_KEY")
-                if not api_key:
-                    st.error("API Key missing in secrets.toml")
-                    st.stop()
-
-                with st.spinner("🤖 AI is analyzing logic flow..."):
+                with st.spinner("🤖 Reading handwriting, diagrams, and equations..."):
                     try:
-                        # 1. LOAD IMAGE
-                        student_img = Image.open(uploaded_file)
-
-                        # 2. GENERATE STUDENT JSON (Using new backend function)
-                        student_json = generate_json_from_image(student_img, "student", api_key)
+                        extracted_results = []
                         
-                        if student_json:
-                            # 3. BUILD GRAPH (Logic Extraction)
-                            node_intents, adj = build_graph(student_json["graph"])
+                        # CASE A: PDF Processing (Multi-page)
+                        if uploaded_file.type == "application/pdf":
+                            images = pdf_to_images(uploaded_file)
+                            progress_bar = st.progress(0)
                             
-                            # 4. GRADING (Compare against Session State Rubric)
-                            rubric = st.session_state['rubric_data']
-                            total_score = 0
-                            breakdown = []
-
-                            # Loop through criteria defined by teacher
-                            for kp in rubric.get("key_points", []):
-                                if kp["type"] == "node_check":
-                                    score, reason = score_node_check(kp, node_intents)
-                                else:
-                                    score, reason = score_connection_check(kp, node_intents, adj)
-
-                                total_score += score
-                                breakdown.append({
-                                    "Criteria": kp["concept"], # Capitalized for table
-                                    "Status": "✅" if score > 0 else "❌",
-                                    "Marks": f"{score}/{kp['marks']}",
-                                    "Feedback": reason
-                                })
-                            
-                            # 5. COMPILE RESULT
-                            result = {
-                                "total_score": round(total_score, 2),
-                                "max_marks": rubric.get("max_marks", 0),
-                                "breakdown": breakdown
-                            }
-                            
-                            # 6. Store Result in Session
-                            st.session_state['exam_result'] = result
-                            st.session_state['graded'] = True
-                            st.toast("Grading Complete!", icon="🎉")
+                            for i, img in enumerate(images):
+                                # Assumption: Page 1 = Q1, Page 2 = Q2, etc.
+                                current_qid = f"Q{i+1}"
+                                st.toast(f"Processing Page {i+1} ({current_qid})...")
+                                
+                                data = extract_answer_obj_from_image(img, current_qid)
+                                extracted_results.append(data)
+                                progress_bar.progress((i + 1) / len(images))
+                                
+                            progress_bar.empty()
+                        
+                        # CASE B: Image Processing (Single Question)
                         else:
-                            st.error("Could not analyze image. The AI returned an empty response.")
-                            
-                    except Exception as e:
-                        st.error(f"An error occurred during grading: {e}")
+                            image = Image.open(uploaded_file)
+                            data = extract_answer_obj_from_image(image, q_id_input)
+                            extracted_results.append(data)
+                        
+                        # Save to session
+                        st.session_state['extracted_data'] = extracted_results
+                        st.success("✅ Extraction Complete!")
+                        st.rerun()
 
-# --- RIGHT: RESULTS ---
-with col_right:
-    st.subheader("📊 Evaluation Report")
+                    except Exception as e:
+                        st.error(f"Error during processing: {e}")
+
+# --- RIGHT COLUMN: PREVIEW & RESULTS ---
+# --- RIGHT COLUMN: PREVIEW & EDIT ---
+with col2:
+    c_head, c_tog = st.columns([0.7, 0.3])
+    with c_head:
+        st.subheader("2. AI Analysis Result")
+    with c_tog:
+        # Toggle to switch between View and Edit modes
+        edit_mode = st.toggle("✏️ Enable Editing", value=False)
     
-    if st.session_state.get('graded') and 'exam_result' in st.session_state:
-        res = st.session_state['exam_result']
+    if not st.session_state['extracted_data']:
+        st.info("👈 Upload a file and click 'Process' to see the extracted data here.")
         
-        # Calculate Metrics
-        score = res.get('total_score', 0)
-        max_marks = res.get('max_marks', 0)
-        percentage = (score / max_marks * 100) if max_marks > 0 else 0
-        
-        with st.container(border=True):
-            # 1. Score Cards
-            c1, c2, c3 = st.columns(3)
-            c1.metric("Total Score", f"{score} / {max_marks}")
-            c2.metric("Accuracy", f"{int(percentage)}%")
-            
-            # Simple Grade Logic
-            grade = "A" if percentage >= 80 else ("B" if percentage >= 60 else "C")
-            c3.metric("Grade", grade)
-            
-            st.divider()
-            
-            # 2. Feedback Table
-            st.markdown("#### 📝 Detailed Feedback")
-            
-            # Convert breakdown list to DataFrame
-            if 'breakdown' in res:
-                df = pd.DataFrame(res['breakdown'])
-                st.dataframe(
-                    df, 
-                    hide_index=True, 
-                    use_container_width=True,
-                    column_order=("Status", "Criteria", "Marks", "Feedback"),
-                    column_config={
-                        "Status": st.column_config.TextColumn("Status", width="small"),
-                        "Criteria": st.column_config.TextColumn("Criteria", width="medium"),
-                        "Marks": st.column_config.TextColumn("Marks", width="small"),
-                        "Feedback": st.column_config.TextColumn("Feedback", width="large"),
-                    }
-                )
-            else:
-                st.info("No detailed breakdown available.")
-            
+        # Placeholder Image
+        st.markdown("""
+        <div style="border: 2px dashed #ddd; padding: 40px; text-align: center; color: #aaa; border-radius: 10px;">
+            📄 Extracted text, equations & flowcharts will appear here.
+        </div>
+        """, unsafe_allow_html=True)
+    
     else:
-        # Empty State
-        st.markdown(
-            """
-            <div style='display: flex; flex-direction: column; align-items: center; 
-                        justify-content: center; height: 350px; color: #aaa; 
-                        border: 2px dashed #e0e0e0; border-radius: 10px;'>
-                <div style="font-size: 3rem;">📊</div>
-                <p style="margin-top: 10px;">Results will appear here</p>
-            </div>
-            """, 
-            unsafe_allow_html=True
-        )
+        # TABS for multiple extracted answers (e.g. Q1, Q2 from PDF)
+        tabs = st.tabs([f"📄 {item.get('question_id', 'Unknown')}" for item in st.session_state['extracted_data']])
+        
+        for i, tab in enumerate(tabs):
+            # We use a direct reference to the list item so updates persist in session_state
+            data = st.session_state['extracted_data'][i]
+            
+            with tab:
+                if "error" in data:
+                    st.error(f"Failed to extract: {data['error']}")
+                else:
+                    # =========================================================
+                    # 🅰️ VIEW MODE (Your Original Code)
+                    # =========================================================
+                    if not edit_mode:
+                        with st.container(border=True):
+                            st.caption("Values below are Read-Only. Toggle 'Enable Editing' above to fix mistakes.")
+                            st.markdown(f"**Question ID:** `{data.get('question_id')}`")
+                            
+                            # Text
+                            if data.get("text"):
+                                st.markdown("##### 📝 Text Content")
+                                for line in data["text"]:
+                                    st.write(f"- {line}")
+                            
+                            # Equations
+                            if data.get("equations"):
+                                st.markdown("##### 🧮 Equations")
+                                for eq in data["equations"]:
+                                    st.latex(eq) 
+                                    st.caption(f"Raw: `{eq}`")
+
+                            # Flowcharts
+                            if data.get("flowcharts"):
+                                st.markdown("##### 🔀 Flowcharts Detected")
+                                st.warning(f"Found {len(data['flowcharts'])} flowchart structure(s).")
+                            
+                            # Final Answer
+                            if data.get("final_answer"):
+                                st.markdown("##### 🏁 Final Answer")
+                                st.success(data["final_answer"])
+                        
+                        with st.expander("🔍 View Raw JSON Object"):
+                            st.json(data)
+
+                    # =========================================================
+                    # 🅱️ EDIT MODE (New Feature)
+                    # =========================================================
+                    else:
+                        st.warning("⚠️ You are in Edit Mode. Changes are saved automatically.")
+                        
+                        # 1. EDIT TEXT (List of Strings)
+                        st.markdown("##### 📝 Edit Text Points")
+                        if "text" not in data or not isinstance(data["text"], list):
+                            data["text"] = []
+                        
+                        # We use DataEditor for easy list manipulation (Add/Delete rows)
+                        df_text = pd.DataFrame(data["text"], columns=["Text Content"])
+                        edited_text_df = st.data_editor(
+                            df_text, 
+                            num_rows="dynamic", 
+                            width="stretch",
+                            key=f"edit_text_{i}"
+                        )
+                        # Save back to session state
+                        data["text"] = edited_text_df["Text Content"].dropna().astype(str).tolist()
+
+                        # 2. EDIT EQUATIONS (List of Strings)
+                        st.markdown("##### 🧮 Edit Equations (LaTeX/Math)")
+                        if "equations" not in data or not isinstance(data["equations"], list):
+                            data["equations"] = []
+
+                        df_eq = pd.DataFrame(data["equations"], columns=["Equation"])
+                        edited_eq_df = st.data_editor(
+                            df_eq, 
+                            num_rows="dynamic", 
+                            width="stretch",
+                            key=f"edit_eq_{i}"
+                        )
+                        data["equations"] = edited_eq_df["Equation"].dropna().astype(str).tolist()
+
+                        # 3. EDIT FINAL ANSWER (String)
+                        st.markdown("##### 🏁 Edit Final Answer")
+                        data["final_answer"] = st.text_input(
+                            "Final Result", 
+                            value=data.get("final_answer") or "",
+                            key=f"edit_final_{i}"
+                        )
+
+                        # 4. EDIT FLOWCHART (Raw JSON)
+                        # Editing nodes/edges graphically is hard, so we edit the JSON structure directly.
+                        if data.get("flowcharts"):
+                            st.markdown("##### 🔀 Edit Flowchart Data (JSON)")
+                            st.info("Edit the 'nodes' and 'edges' text directly below.")
+                            
+                            # Convert dict list to string for editing
+                            fc_str = json.dumps(data["flowcharts"], indent=2)
+                            edited_fc_str = st.text_area(
+                                "Flowchart JSON", 
+                                value=fc_str, 
+                                height=200,
+                                key=f"edit_fc_{i}"
+                            )
+                            
+                            # Try to save back if valid JSON
+                            try:
+                                data["flowcharts"] = json.loads(edited_fc_str)
+                            except json.JSONDecodeError:
+                                st.error("Invalid JSON format in Flowchart editor.")
+
+        st.markdown("---")
+        # Ensure we are submitting the LATEST session state data (which includes edits)
+        if st.button("✅ Confirm & Submit for Grading", type="primary", use_container_width=True):
+            
+            # Use the backend handler we defined earlier
+            submission_package = {
+                "student_name": st.session_state.get('username', 'vax'),
+                "student_id": st.session_state.get('student_id', 'ST-001'),
+                "answers": st.session_state['extracted_data'], # Contains edits
+                "status": "Submitted"
+            }
+            
+            # Call DB Save Function
+            if submit_student_answers(submission_package):
+                st.toast("Answers submitted to grading engine! (Next step: Evaluation)", icon="🎉")
+                st.balloons()
+            else:
+                st.error("Failed to save submission.")
