@@ -10,7 +10,7 @@ from openai import OpenAI
 
 # IMPORT THE DATABASE HANDLER
 try:
-    # Added load_db here because your code uses it for the exam selector and results
+    # Added load_db here 
     from backend.db_handler import submit_student_answers, load_db
 except ImportError:
     st.error("⚠️ Error: Could not import 'backend/db_handler.py'. Make sure the file exists.")
