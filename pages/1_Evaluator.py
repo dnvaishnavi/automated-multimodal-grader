@@ -285,9 +285,22 @@ def toggle_publish_status(test_id):
 # -----------------------------------------------------------------------------
 # 4. MAIN LAYOUT
 # -----------------------------------------------------------------------------
+# ... existing imports ...
+
+# -----------------------------------------------------------------------------
+# 4. MAIN LAYOUT
+# -----------------------------------------------------------------------------
 with st.sidebar:
     st.image("https://cdn-icons-png.flaticon.com/512/3135/3135715.png", width=80)
     st.title("Teacher Profile")
+    
+    # --- NEW: TEACHER ID INPUT ---
+    # The teacher must enter the ID that the Admin used to assign papers
+    if 'teacher_id' not in st.session_state: st.session_state['teacher_id'] = "T-MATH-01"
+    st.session_state['teacher_id'] = st.text_input("My Teacher ID", st.session_state['teacher_id'], help="You will only see papers assigned to this ID.")
+    st.divider()
+    # -----------------------------
+
     st.session_state['teacher_profile']['name'] = st.text_input("Name", st.session_state['teacher_profile']['name'])
     st.session_state['teacher_profile']['subject'] = st.text_input("Subject", st.session_state['teacher_profile']['subject'])
     if st.button("🚪 Logout", use_container_width=True):
@@ -515,10 +528,22 @@ with tab_control:
         st.divider()
 
         # --- STUDENT LIST ---
-        test_submissions = [s for s in db.get("submissions", []) if s.get("test_id") == active_tid]
+        current_teacher_id = st.session_state.get('teacher_id', '').strip()
         
-        if not test_submissions:
-            st.info(f"No students have submitted work for '{selected_label}' yet.")
+        all_subs = db.get("submissions", [])
+        
+        # Filter 1: By Test ID
+        # Filter 2: By Assigned Teacher ID (Must match current user)
+        test_submissions = [
+            s for s in all_subs 
+            if s.get("test_id") == active_tid 
+            and s.get("assigned_teacher_id") == current_teacher_id
+        ]
+        
+        if not current_teacher_id:
+            st.warning("⚠️ Please enter your 'Teacher ID' in the sidebar to view your assigned papers.")
+        elif not test_submissions:
+            st.info(f"No papers for '{selected_label}' have been assigned to **{current_teacher_id}** yet.")
         else:
             cols = st.columns([1, 2, 1, 1, 2])
             headers = ["ID", "Name", "Status", "Grade", "Actions"]

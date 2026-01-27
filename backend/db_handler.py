@@ -5,10 +5,19 @@ import os
 DB_FILE = "school_data.json"
 
 def load_db():
+    """Loads the database from the JSON file."""
     if not os.path.exists(DB_FILE):
+        # Create the file if it doesn't exist
+        init_data = {"tests": [], "submissions": []}
+        with open(DB_FILE, "w") as f:
+            json.dump(init_data, f, indent=4)
+        return init_data
+    
+    try:
+        with open(DB_FILE, "r") as f:
+            return json.load(f)
+    except json.JSONDecodeError:
         return {"tests": [], "submissions": []}
-    with open(DB_FILE, "r") as f:
-        return json.load(f)
 
 def save_db(data):
     with open(DB_FILE, "w") as f:
@@ -42,3 +51,15 @@ def submit_student_answers(submission_obj):
 def get_submissions_for_teacher():
     db = load_db()
     return db["submissions"]
+# --- ADD THIS FUNCTION TO backend/db_handler.py ---
+
+def assign_paper_to_teacher(student_id, test_id, teacher_id):
+    """Updates a submission with an assigned teacher ID."""
+    db = load_db()
+    for sub in db["submissions"]:
+        if sub["student_id"] == student_id and sub["test_id"] == test_id:
+            sub["assigned_teacher_id"] = teacher_id
+            sub["status"] = "Assigned" # Update status text
+            save_db(db)
+            return True
+    return False

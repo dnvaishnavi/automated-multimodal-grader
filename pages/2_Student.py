@@ -108,7 +108,7 @@ def extract_answer_obj_from_image(image: Image.Image, question_id: str):
 
     try:
         response = client.chat.completions.create(
-            model="qwen/qwen-2.5-vl-7b-instruct:free",
+            model="google/gemini-2.0-flash-001",
             messages=[
                 {
                     "role": "user",
@@ -120,10 +120,21 @@ def extract_answer_obj_from_image(image: Image.Image, question_id: str):
             ],
             temperature=0
         )
-        raw_text = response.choices[0].message.content
-        cleaned = clean_json_text(raw_text)
+       # --- DEBUGGING & SAFETY CHECKS ---
+        if not response or not response.choices:
+            return {"error": "API returned an empty response. Try again.", "question_id": question_id}
+        
+        message_content = response.choices[0].message.content
+        
+        if not message_content:
+             return {"error": "Model generated empty text.", "question_id": question_id}
+
+        cleaned = clean_json_text(message_content)
         return json.loads(cleaned)
+
     except Exception as e:
+        # This prints the specific error to your terminal for debugging
+        print(f"Extraction Error: {e}")
         return {"error": str(e), "question_id": question_id}
 
 # -----------------------------------------------------------------------------
