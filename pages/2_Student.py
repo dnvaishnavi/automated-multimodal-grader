@@ -40,7 +40,34 @@ def pdf_to_images(pdf_file, dpi=200):
         img = Image.open(io.BytesIO(pix.tobytes("png")))
         images.append(img)
     return images
+import requests # Make sure to pip install requests
 
+def upload_to_imgbb(image_file):
+    """Uploads image to ImgBB and returns the public URL."""
+    api_key = st.secrets["IMGBB_API_KEY"]
+    url = "https://api.imgbb.com/1/upload"
+    
+    # Prepare payload
+    payload = {
+        "key": api_key,
+        "expiration": 0 # 0 = Never expire
+    }
+    
+    # Send image file
+    files = {
+        "image": image_file.getvalue()
+    }
+    
+    try:
+        response = requests.post(url, data=payload, files=files)
+        if response.status_code == 200:
+            return response.json()["data"]["url"]
+        else:
+            st.error(f"Upload failed: {response.text}")
+            return None
+    except Exception as e:
+        st.error(f"Error uploading: {e}")
+        return None
 def image_to_base64(image: Image.Image):
     """Converts PIL Image to Base64 string."""
     buffer = io.BytesIO()
@@ -212,6 +239,9 @@ with tab_submit:
 
                 if uploaded_file:
                     if st.button("🚀 Process & Extract Answers", type="primary"):
+                        st.session_state['file_bytes'] = uploaded_file.getvalue()   # <--- NEW
+                        st.session_state['file_type'] = uploaded_file.type         # <--- NEW
+                        
                         st.session_state['extracted_data'] = [] # Clear previous
 
                         with st.spinner("🤖 Reading handwriting, diagrams, and equations..."):
@@ -381,12 +411,62 @@ with tab_submit:
 
                 st.markdown("---")
                 # Ensure we are submitting the LATEST session state data (which includes edits)
-                if st.button("✅ Confirm & Submit for Grading", type="primary", use_container_width=True):            
+                # Ensure we are submitting the LATEST session state data
+                if st.button("✅ Confirm & Submit for Grading", type="primary", use_container_width=True, key=f"submit_btn_{i}"):            
+                    # --- STEP 1: RESTORE IMAGE FROM SESSION STATE ---
+                    img = None
+                    try:
+                        # Check if we have the file in memory
+                        if 'file_bytes' not in st.session_state:
+                            st.error("⚠️ File session expired. Please re-upload and click Process again.")
+                            st.stop()
+
+                        # Reconstruct the file from bytes
+                        file_bytes = st.session_state['file_bytes']
+                        file_type = st.session_state['file_type']
+                        reconstructed_file = io.BytesIO(file_bytes)
+
+                        # Handle PDF vs Image
+                        if file_type == "application/pdf":
+                            doc = fitz.open(stream=reconstructed_file.read(), filetype="pdf")
+                            if i < len(doc):
+                                pix = doc[i].get_pixmap(dpi=200)
+                                img = Image.open(io.BytesIO(pix.tobytes("png")))
+                            else:
+                                st.error(f"Page {i+1} not found in PDF.")
+                                st.stop()
+                        else:
+                            img = Image.open(reconstructed_file)
+
+                    except Exception as e:
+                        st.error(f"Error restoring image: {e}")
+                        st.stop()
+                    
+                    # --- STEP 2: UPLOAD TO IMGBB FIRST ---
+                    image_url = None
+                    with st.spinner("☁️ Uploading image to cloud..."):
+                        try:
+                            buf = io.BytesIO()
+                            img.save(buf, format="PNG")
+                            image_url = upload_to_imgbb(buf)
+                            
+                            if not image_url:
+                                st.error("Failed to upload image. Please check API key.")
+                                st.stop()
+                                
+                            # CRITICAL FIX: Update the session state data with the URL *BEFORE* submitting
+                            st.session_state['extracted_data'][i]["source_image"] = image_url
+                            
+                        except Exception as e:
+                            st.error(f"Upload Error: {e}")
+                            st.stop()
+
+                    # --- STEP 3: CREATE PACKAGE & SUBMIT TO DB ---
                     submission_package = {
                         "student_name": st.session_state['student_name'],
                         "student_id": st.session_state['student_id'],
-                        "test_id": selected_test_id, # <--- THIS LINKS THE EXAM
-                        "answers": st.session_state['extracted_data'],
+                        "test_id": selected_test_id,
+                        "answers": st.session_state['extracted_data'], # This now contains the URL!
                         "status": "Submitted",
                         "graded_result": None 
                     }
@@ -394,8 +474,11 @@ with tab_submit:
                     if submit_student_answers(submission_package):
                         st.balloons()
                         st.success(f"Submitted to {selected_test_name} successfully!")
+                        # Optional: Clear state to prevent double submission
+                        # st.session_state['extracted_data'] = []
+                        # st.rerun()
                     else:
-                        st.error("Failed to save submission.")
+                        st.error("Failed to save submission to database.")
 
 # =============================================================================
 # TAB 2: VIEW RESULTS (NEW FEATURE)

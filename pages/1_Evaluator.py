@@ -1,3 +1,4 @@
+import base64
 import streamlit as st
 import pandas as pd
 import json
@@ -80,17 +81,37 @@ def review_submission_dialog(student_id, test_id):
     Pop-up to view, grade, and edit a specific student's submission.
     """
     db = load_db()
-    
-    # 1. Fetch Submission and Test Data
+
+    # 1. MOVE THIS TO THE TOP: Fetch Submission FIRST
     submission = next((s for s in db.get("submissions", []) 
                        if s["student_id"] == student_id and s["test_id"] == test_id), None)
     
     active_test = next((t for t in db.get("tests", []) if t["test_id"] == test_id), None)
 
+    # 2. Safety Check: If not found, stop immediately
     if not submission:
         st.error("Submission data not found.")
         return
 
+    # 3. NOW it is safe to use 'submission' for the image viewer
+    with st.expander("📄 View Original Student Answer", expanded=False):
+        if 'answers' in submission and submission['answers']:
+            for idx, ans in enumerate(submission['answers']):
+                # Check if it's a URL (starts with http)
+                img_source = ans.get('source_image', '')
+                
+                if img_source.startswith("http"):
+                    st.image(img_source, caption=f"Page {idx+1}", use_container_width=True)
+                elif img_source: 
+                    # Fallback for old Base64 images
+                    try:
+                        st.image(base64.b64decode(img_source), use_container_width=True)
+                    except:
+                        st.error("Invalid Image Data")
+        else:
+            st.info("No images attached to this submission.")
+
+    # 4. Continue with Grading Logic...
     st.caption(f"Student: **{submission.get('student_name', student_id)}** | Test: **{active_test['test_name']}**")
     
     is_graded = submission.get("graded_result") is not None

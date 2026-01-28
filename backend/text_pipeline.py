@@ -138,7 +138,28 @@ def detect_equation_type(eq):
         if sympify(rhs).is_number: return "computation"
     except: pass
     return "law"
-
+def normalize_chemical_equation(eq):
+    """
+    Normalizes chemical equation for robust comparison.
+    Fixed Regex to handle (aq) correctly.
+    """
+    if not eq: return ""
+    
+    # 1. Unicode Subscript Map (₂ -> 2)
+    subscript_map = str.maketrans("₀₁₂₃₄₅₆₇₈₉", "0123456789")
+    eq = eq.translate(subscript_map)
+    
+    # 2. Normalize Arrow
+    eq = eq.replace("→", "->").replace("=>", "->")
+    
+    # 3. Remove State Symbols (aq), (s), (l), (g) 
+    # FIX: Changed regex from [aslg] to [a-z] to capture 'aq'
+    eq = re.sub(r"\([a-z]{1,3}\)", "", eq, flags=re.IGNORECASE)
+    
+    # 4. Remove all whitespace to handle "2 NaCl" vs "2NaCl"
+    eq = eq.replace(" ", "")
+    
+    return eq
 def evaluate_equation_evidence(student_equations, key_point):
     expected_eq = key_point.get("expected_equation")
     if not expected_eq: return {"matched": False, "reason": "No expected equation"}
@@ -147,13 +168,46 @@ def evaluate_equation_evidence(student_equations, key_point):
 
     # 1. Chemistry
     if eq_type == "reaction":
-        exp_rxn = parse_reaction(expected_eq)
-        if exp_rxn:
-            for eq in student_equations:
-                stu_rxn = parse_reaction(eq)
-                if stu_rxn and stu_rxn == exp_rxn:
-                    return {"matched": True, "reason": "Correct chemical reaction."}
-        return {"matched": False, "reason": "Reaction mismatch"}
+        expected_eq = key_point.get("expected_equation")
+        if not expected_eq: return {"matched": False, "reason": "No expected equation"}
+
+        # Normalize Teacher Key
+        norm_expected = normalize_chemical_equation(expected_eq)
+        
+        # Pre-calculate Teacher's Reactants/Products for comparison
+        try:
+            if "->" in norm_expected:
+                exp_lhs, exp_rhs = norm_expected.split("->")
+                # Sort to handle order difference (A+B vs B+A)
+                exp_reactants = sorted(exp_lhs.split("+"))
+                exp_products = sorted(exp_rhs.split("+"))
+            else:
+                exp_reactants, exp_products = [norm_expected], []
+        except:
+            return {"matched": False, "reason": "Invalid Key Format"}
+
+        for eq in student_equations:
+            norm_student = normalize_chemical_equation(eq)
+            
+            # LEVEL 1: Exact String Match (Fastest)
+            if norm_student == norm_expected:
+                return {"matched": True, "reason": "✅ Correct balanced equation (Exact Match)."}
+                
+            # LEVEL 2: Component Match (Handles Balancing & Order)
+            try:
+                if "->" in norm_student:
+                    stu_lhs, stu_rhs = norm_student.split("->")
+                    stu_reactants = sorted(stu_lhs.split("+"))
+                    stu_products = sorted(stu_rhs.split("+"))
+                    
+                    # STRICT MATCH: If lists are equal, it implies coefficients (balancing) are also equal.
+                    # Example: ['BaSO4', '2NaCl'] == ['BaSO4', '2NaCl']
+                    if stu_reactants == exp_reactants and stu_products == exp_products:
+                        return {"matched": True, "reason": "✅ Correct balanced equation."}
+            except:
+                continue
+
+        return {"matched": False, "reason": "Equation mismatch or unbalanced."}
 
     # 2. Math/Physics
     expected = parse_expression(expected_eq)
@@ -198,38 +252,34 @@ def get_openai_client():
     if not api_key: return None
     return OpenAI(base_url="https://openrouter.ai/api/v1", api_key=api_key)
 
-def _classify_alignment_llm(student_text, concept, max_m):
+def _classify_alignment_llm(student_context, concept, max_m):
     client = get_openai_client()
     if not client: return {"awarded_marks": 0, "reasoning": "API Key Missing"}
 
     prompt = f"""
-    You are a subjective evaluator. Verify if a specific "Target Concept" is present in the "Student Answer".
+You are an academic grader.
+    
+    TARGET CRITERIA: "{concept}"
+    
+    STUDENT ANSWER CONTEXT:
+    {student_context}
 
-    Target Concept: "{concept}"
-    Student Answer: "{student_text}"
+    INSTRUCTIONS:
+    1. Search the "STUDENT ANSWER CONTEXT" for the "TARGET CRITERIA".
+    2. If the criteria is a CHEMICAL/MATH EQUATION, check if the student has written it (even with slight formatting differences like '->' instead of '→' or missing states like '(aq)').
+    3. If the criteria is TEXT, check for semantic meaning.
+    
+    SCORING RULES:
+    - FULL MARKS ({max_m}): Concept/Equation is present and correct.
+    - PARTIAL MARKS: Present but has minor errors (e.g. unbalanced equation).
+    - ZERO MARKS: Completely missing or wrong.
 
-    Task:
-    - Award partial credit if key points are semantically correct
-    - Do NOT penalize correct answers with different wording
-    -follow below rules:
-    1. "FULLY_CORRECT": If the student explicitly or implicitly demonstrates the target concept(key concept) correctly (via text, equations, or synonyms) anywhere in the entire student answer.
-    2. "PARTIALLY_CORRECT": The student mentions the target concept somewhere in the entire student answer but it is incomplete, vague, or has minor details missing grade proportionally according to correctness.
-    3. "CONTRADICTION": The student explicitly states something that is the OPPOSITE or logically incompatible with the target concept or a wrong answer completely marks must be 0 for such answers especially in math  or chemistry related answers and equations.
-    4. "MISSING": The concept is completely absent or the text is unrelated also marks are 0.
-
-    Instructions:
-    - IGNORE extra information that is not related to the Target Concept.
-    - Judge semantic meaning, not wording.
-    - Award correctness if meaning matches.
-    - Respond ONLY with valid JSON.
-
-    Format:
+    OUTPUT JSON ONLY:
     {{
-      "awarded_marks": "just a suitable mark between (0-{max_m})",
-      "reasoning": "Explain where student went wrong in case of marks less than full and if full give reason for that too.Reason must only focus on and explain in context of target concept and nothing else "
+      "awarded_marks": <number between 0 and {max_m}>,
+      "reasoning": "<short explanation>"
     }}
     """
-    
     try:
         response = client.chat.completions.create(
             model="meta-llama/llama-3.3-70b-instruct:free",
@@ -244,7 +294,7 @@ def _classify_alignment_llm(student_text, concept, max_m):
         return {"awarded_marks": 0, "reasoning": f"LLM Error: {e}"}
 
 def evaluate_key_point_llm(answer_obj, key_point):
-    # 1. Run Heuristics (Fast)
+    # 1. Run Heuristics (Fast Checks)
     evidences = []
     if "text" in key_point["acceptable_modalities"]:
         evidences.append(evaluate_text_evidence(answer_obj.get("text", []), key_point))
@@ -256,30 +306,52 @@ def evaluate_key_point_llm(answer_obj, key_point):
     # Pick best heuristic result
     best_res = max(evidences, key=lambda x: x.get("awarded_marks", 0)) if evidences else {"awarded_marks": 0, "reason": "No match"}
     
-    # 2. Decide if we need LLM Refinement
-    # Trigger if: Heuristics gave < Max Marks AND we have text to analyze
+    # 2. LLM Refinement Logic
     current_score = best_res.get("awarded_marks", 0)
     max_score = key_point["marks"]
     
-    context_text = " ".join(answer_obj.get("text", [])) + " " + str(answer_obj.get("final_answer", ""))
+    # --- FIX 1: INCLUDE EQUATIONS IN CONTEXT FOR LLM ---
+    # We must construct a string that contains EVERYTHING the student wrote.
+    text_content = " ".join(answer_obj.get("text", []))
+    eq_content = " ".join(answer_obj.get("equations", [])) # <--- This was missing!
+    final_content = str(answer_obj.get("final_answer", ""))
     
-    if current_score < max_score and len(context_text) > 5:
+    context_text = f"""
+    [Text]: {text_content}
+    [Equations]: {eq_content}
+    [Final Answer]: {final_content}
+    """
+    
+    # We trigger LLM if heuristics failed to give full marks
+    if current_score < max_score:
         print(f"🔍 Refining '{key_point['id']}' with LLM...")
-        llm_res = _classify_alignment_llm(context_text, key_point["concept"], max_score)
         
-        # Trust LLM if it gives a score
+        # --- FIX 2: TELL LLM THE EXPECTED EQUATION ---
+        # Don't just send the word "equation". Send the actual formula.
+        target_concept = key_point["concept"]
+        
+        if key_point.get("expected_equation"):
+            target_concept = f"Equation matching: {key_point['expected_equation']}"
+        elif key_point.get("expected_final_answer"):
+            target_concept = f"Final Value: {key_point['expected_final_answer']}"
+
+        llm_res = _classify_alignment_llm(context_text, target_concept, max_score)
+        
         if isinstance(llm_res.get("awarded_marks"), (int, float)):
              return {
                 "key_id": key_point["id"],
-                "awarded_marks": llm_res["awarded_marks"],
+                "awarded_marks": float(llm_res["awarded_marks"]),
                 "max_marks": max_score,
                 "reason": f"[LLM] {llm_res.get('reasoning')}"
             }
 
-    # Default to heuristic
+    # Default to heuristic result if LLM wasn't needed or failed
+    if best_res.get("matched"):
+        best_res["awarded_marks"] = max_score # Give full marks if matched strictly
+        
     return {
         "key_id": key_point["id"],
-        "awarded_marks": current_score,
+        "awarded_marks": best_res.get("awarded_marks", 0),
         "max_marks": max_score,
         "reason": best_res.get("reason", "Criteria not met")
     }
